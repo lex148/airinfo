@@ -1,30 +1,34 @@
-//use bluer::{AdapterEvent, Device};
 use btleplug::api::{Central, Manager as _, Peripheral, ScanFilter};
 use btleplug::platform::Manager;
-use futures::StreamExt;
+use btleplug::Error;
 use std::time::Duration;
 use tokio::time;
 
 const APPLE: u16 = 76;
 const DATA_LENGTH: usize = 27;
 type Packet = [u8; 27];
-const MIN_RSSI: i16 = -60;
+const MIN_RSSI: i16 = -90;
+//const MIN_RSSI: i16 = -60;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = read_bytes().await?;
-    if let Some(raw) = bytes {
-        let pod = Pod::try_parse(&raw).unwrap();
-        println!("POD: {:?}", pod);
-        println!("BYTES: {:?}", bytes);
+    let pods = find_pods().await?;
+    for pod in pods {
+        println!("POD: {:#?}", pod);
     }
 
     Ok(())
 }
 
-async fn read_bytes() -> Result<Option<Packet>, Box<dyn std::error::Error>> {
+pub async fn find_pods() -> Result<Vec<Pod>, Error> {
+    let bytes = read_bytes().await?;
+    Ok(bytes.iter().map(Pod::parse).collect())
+}
+
+async fn read_bytes() -> Result<Vec<Packet>, Error> {
     let manager = Manager::new().await?;
     let adapter_list = manager.adapters().await?;
+    let mut found = Vec::default();
 
     if adapter_list.is_empty() {
         eprintln!("No Bluetooth adapters found");
@@ -39,15 +43,69 @@ async fn read_bytes() -> Result<Option<Packet>, Box<dyn std::error::Error>> {
             let properties = peripheral.properties().await?.unwrap_or_default();
             let datas = properties.manufacturer_data.get(&APPLE);
 
+            if let Some(rssi) = properties.rssi {
+                if rssi < MIN_RSSI {
+                    continue;
+                }
+            }
+
             if let Some(data) = datas {
                 if data.len() == DATA_LENGTH {
                     let d: Packet = data.clone().try_into().unwrap();
-                    return Ok(Some(d));
+                    found.push(d);
                 }
             }
         }
     }
-    Ok(None)
+    Ok(found)
+}
+
+#[derive(Debug, Clone)]
+pub struct Pod {
+    pub model: Model,
+    pub left: Device,
+    pub right: Device,
+    pub case: Option<Device>,
+}
+
+impl Pod {
+    fn parse(raw: &Packet) -> Pod {
+        let hex = to_hex_str(raw);
+        let model = Model::parse(&hex);
+        let [left, mut right, case] = build_devices(&hex);
+        let mut case = Some(case);
+
+        // If it is a single model, the left and right device are the same
+        // and there is no case
+        let single = match model {
+            Model::Unknown => false,
+            Model::AirPods1 => false,
+            Model::AirPods2 => false,
+            Model::AirPods3 => false,
+            Model::AirPodsPro => false,
+            Model::AirPodsPro2 => false,
+            Model::AirPodsPro2Usbc => false,
+            Model::AirPodsMax => true,
+            Model::PowerbeatsPro => false,
+            Model::BeatsX => true,
+            Model::BeatsFlex => true,
+            Model::BeatsSolo3 => true,
+            Model::BeatsStudio3 => true,
+            Model::Powerbeats3 => true,
+        };
+
+        if single {
+            right = left.clone();
+            case = None
+        }
+
+        Pod {
+            model,
+            left,
+            right,
+            case,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +115,7 @@ pub enum Model {
     AirPods3,
     AirPodsPro,
     AirPodsPro2,
+    AirPodsPro2Usbc,
     AirPodsMax,
     PowerbeatsPro,
     BeatsX,
@@ -80,13 +139,14 @@ impl Model {
             "1320" => Model::AirPods3,
             "0E20" => Model::AirPodsPro,
             "1420" => Model::AirPodsPro2,
-            _ if id_single == 'A' => Model::AirPodsMax,
+            "2420" => Model::AirPodsPro2Usbc,
+            _ if id_single == 'A' => Model::AirPodsMax, //single
             _ if id_single == 'B' => Model::PowerbeatsPro,
-            "0520" => Model::BeatsX,
-            "1020" => Model::BeatsFlex,
-            "0620" => Model::BeatsSolo3,
-            _ if id_single == '9' => Model::BeatsStudio3,
-            "0320" => Model::Powerbeats3,
+            "0520" => Model::BeatsX,                      //single
+            "1020" => Model::BeatsFlex,                   //single
+            "0620" => Model::BeatsSolo3,                  //single
+            _ if id_single == '9' => Model::BeatsStudio3, //single
+            "0320" => Model::Powerbeats3,                 //single
             _ => Model::Unknown,
         }
     }
@@ -96,85 +156,63 @@ fn to_hex_str(data: &Packet) -> String {
     data.iter().map(|byte| format!("{:02X}", byte)).collect()
 }
 
-#[derive(Debug, Clone)]
-pub struct Pod {
-    pub model: Model,
-    pub left_status: i32,
-    pub right_status: i32,
-    pub case_status: i32,
-    pub single_status: i32,
-    pub charge_status: i32,
-    pub charge_left: bool,
-    pub charge_right: bool,
-    pub charge_case: bool,
-    pub charge_single: bool,
-    pub in_ear_left: bool,
-    pub in_ear_right: bool,
+fn is_swapped(raw: &str) -> bool {
+    let status_byte = raw.chars().nth(10).unwrap().to_string();
+    let status_int = i32::from_str_radix(&status_byte, 16).unwrap();
+    (status_int & 0x02) == 0
 }
 
-impl Pod {
-    fn try_parse(raw: &Packet) -> Option<Pod> {
-        let hex = to_hex_str(raw);
-        println!("HEX: {}", hex);
+#[derive(Debug, Clone)]
+pub struct Device {
+    pub battery: u8,
+    pub charging: bool,
+    pub on_ear: Option<bool>,
+}
 
-        let flip = false;
-
-        // Parsing battery status with hexadecimal base
-        let left_status = i32::from_str_radix(
-            &hex.chars()
-                .nth(flip as usize * 12 + (!flip as usize) * 13)
-                .unwrap()
-                .to_string(),
-            16,
-        )
-        .unwrap();
-
-        let right_status = i32::from_str_radix(
-            &hex.chars()
-                .nth(flip as usize * 13 + (!flip as usize) * 12)
-                .unwrap()
-                .to_string(),
-            16,
-        )
-        .unwrap();
-
-        let case_status =
-            i32::from_str_radix(&hex.chars().nth(15).unwrap().to_string(), 16).unwrap();
-        let single_status =
-            i32::from_str_radix(&hex.chars().nth(13).unwrap().to_string(), 16).unwrap();
-
-        // Parsing charge status
-        let charge_status =
-            i32::from_str_radix(&hex.chars().nth(14).unwrap().to_string(), 16).unwrap();
-
-        // Determining charging status with bitwise operations
-        let charge_left = (charge_status & if flip { 0b00000010 } else { 0b00000001 }) != 0;
-        let charge_right = (charge_status & if flip { 0b00000001 } else { 0b00000010 }) != 0;
-        let charge_case = (charge_status & 0b00000100) != 0;
-        let charge_single = (charge_status & 0b00000001) != 0;
-
-        // Parsing in-ear status
-        let in_ear_status =
-            i32::from_str_radix(&hex.chars().nth(11).unwrap().to_string(), 16).unwrap();
-
-        // Determining in-ear status with bitwise operations
-        let in_ear_left = (in_ear_status & if flip { 0b00001000 } else { 0b00000010 }) != 0;
-        let in_ear_right = (in_ear_status & if flip { 0b00000010 } else { 0b00001000 }) != 0;
-
-        Some(Pod {
-            model: Model::parse(&hex),
-
-            left_status,
-            right_status,
-            case_status,
-            single_status,
-            charge_status,
-            charge_left,
-            charge_right,
-            charge_case,
-            charge_single,
-            in_ear_left,
-            in_ear_right,
-        })
+impl Device {
+    fn new(raw_battery: i32, charging: bool, on_ear: Option<bool>) -> Self {
+        Self {
+            battery: (raw_battery * 10) as u8,
+            charging,
+            on_ear,
+        }
     }
+}
+
+fn build_devices(hex: &str) -> [Device; 3] {
+    // Parsing battery status with hexadecimal base
+    let char = &hex.chars().nth(13).unwrap().to_string();
+    let pod1_battery = i32::from_str_radix(char, 16).unwrap();
+
+    let char = &hex.chars().nth(12).unwrap().to_string();
+    let pod2_battery = i32::from_str_radix(char, 16).unwrap();
+
+    let char = &hex.chars().nth(15).unwrap().to_string();
+    let case_battery = i32::from_str_radix(char, 16).unwrap();
+
+    //// Parsing charge status
+    let char = &hex.chars().nth(14).unwrap().to_string();
+    let charge_bits = i32::from_str_radix(char, 16).unwrap();
+    // Determining charging with bitwise operations
+    let charge_pod1 = (charge_bits & 0b00000001) != 0;
+    let charge_pod2 = (charge_bits & 0b00000010) != 0;
+    let charge_case = (charge_bits & 0b00000100) != 0;
+
+    //// Parsing in-ear status
+    let char = &hex.chars().nth(11).unwrap().to_string();
+    let in_ear_bits = i32::from_str_radix(char, 16).unwrap();
+    // Determining in-ear status with bitwise operations
+    let in_ear_pod1 = (in_ear_bits & 0b00000010) != 0;
+    let in_ear_pod2 = (in_ear_bits & 0b00001000) != 0;
+
+    let mut device1 = Device::new(pod1_battery, charge_pod1, Some(in_ear_pod1));
+    let mut device2 = Device::new(pod2_battery, charge_pod2, Some(in_ear_pod2));
+    let case = Device::new(case_battery, charge_case, None);
+
+    // If left and right pods are backwards, swap them
+    if is_swapped(hex) {
+        std::mem::swap(&mut device1, &mut device2);
+    }
+
+    [device1, device2, case]
 }
