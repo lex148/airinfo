@@ -1,3 +1,5 @@
+use super::PacketNibble;
+
 #[derive(Debug, Clone)]
 pub enum Model {
     AirPods1,
@@ -17,26 +19,31 @@ pub enum Model {
 }
 
 impl Model {
-    pub(crate) fn parse(hex: &str) -> Model {
+    pub(crate) fn parse(raw: &PacketNibble) -> Model {
         // Extract the single character and the substring from `status`
-        let id_single = hex.chars().nth(7).unwrap(); // Safe as we expect `status` to be long enough
-        let id_full = &hex[6..10]; // Slices in Rust are zero-indexed and exclusive at the end
+        let id_single = raw[7];
+
+        // put the nibbles into a u16
+        let id_full: u16 = ((raw[6] as u16 & 0x0F) << 12) | // Low nibble of bytes[0]
+            ((raw[7] as u16 & 0x0F) << 8) |                 // Low nibble of bytes[1]
+            ((raw[8] as u16 & 0x0F) << 4) |                 // Low nibble of bytes[2]
+            (raw[9] as u16 & 0x0F); // Low nibble of bytes[3]
 
         // Pattern match on `id_full` and `id_single` to identify the pod type
         match id_full {
-            "0220" => Model::AirPods1,
-            "0F20" => Model::AirPods2,
-            "1320" => Model::AirPods3,
-            "0E20" => Model::AirPodsPro,
-            "1420" => Model::AirPodsPro2,
-            "2420" => Model::AirPodsPro2Usbc,
-            _ if id_single == 'A' => Model::AirPodsMax, //single
-            _ if id_single == 'B' => Model::PowerbeatsPro,
-            "0520" => Model::BeatsX,                      //single
-            "1020" => Model::BeatsFlex,                   //single
-            "0620" => Model::BeatsSolo3,                  //single
-            _ if id_single == '9' => Model::BeatsStudio3, //single
-            "0320" => Model::Powerbeats3,                 //single
+            0x0220 => Model::AirPods1,
+            0x0F20 => Model::AirPods2,
+            0x1320 => Model::AirPods3,
+            0x0E20 => Model::AirPodsPro,
+            0x1420 => Model::AirPodsPro2,
+            0x2420 => Model::AirPodsPro2Usbc,
+            _ if id_single == 0xA => Model::AirPodsMax, //single
+            _ if id_single == 0xB => Model::PowerbeatsPro,
+            0x0520 => Model::BeatsX,                      //single
+            0x1020 => Model::BeatsFlex,                   //single
+            0x0620 => Model::BeatsSolo3,                  //single
+            _ if id_single == 0x9 => Model::BeatsStudio3, //single
+            0x0320 => Model::Powerbeats3,                 //single
             _ => Model::Unknown,
         }
     }

@@ -1,25 +1,24 @@
 use super::device::build_devices;
 use super::device::Device;
 use super::model::Model;
-use super::Packet;
+use crate::PacketNibble;
 
 #[derive(Debug, Clone)]
 pub struct Pod {
+    /// What models of Pod was Found
     pub model: Model,
+    /// Left Earbud, will be None if disconnected.
     pub left: Option<Device>,
+    /// Right Earbud, will be None if disconnected.
     pub right: Option<Device>,
+    /// The Case, Will be None if disconnected or the Pod doesn't have a Case
     pub case: Option<Device>,
 }
 
-fn to_hex_str(data: &Packet) -> String {
-    data.iter().map(|byte| format!("{:02X}", byte)).collect()
-}
-
 impl Pod {
-    pub(crate) fn parse(raw: &Packet) -> Pod {
-        let hex = to_hex_str(raw);
-        let model = Model::parse(&hex);
-        let [left_raw, right_raw, case_raw] = build_devices(&hex);
+    pub(crate) fn parse(raw: &PacketNibble) -> Pod {
+        let model = Model::parse(raw);
+        let [left_raw, right_raw, case_raw] = build_devices(raw);
         let mut left = Some(left_raw.clone());
         let mut right = Some(right_raw.clone());
         let mut case = Some(case_raw.clone());
